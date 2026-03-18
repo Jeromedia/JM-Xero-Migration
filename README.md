@@ -1,59 +1,159 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Xero Migration
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Private Laravel-based console utility for controlled data migration and validation tasks using the Xero API.
 
-## About Laravel
+⚠️ **Private Project / Private Report**  
+This repository and its contents are strictly private and intended for internal use only.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+---
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## Overview
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+Xero Migration is a **Laravel console application** designed to run internal automation, integration, or data migration tasks against Xero organizations.
 
-## Learning Laravel
+Key characteristics:
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+- No public web interface
+- Executed via Artisan commands only
+- Designed for controlled, one-off or batch operations
+- Focused on speed, clarity, and minimal infrastructure
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+---
 
-## Laravel Sponsors
+## Tech Stack
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+- PHP
+- Laravel 12
+- MySQL
+- Artisan Console Commands
+- Xero API (OAuth 2.0)
+- Hosted on a small DigitalOcean droplet
 
-### Premium Partners
+---
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+## Requirements
 
-## Contributing
+- PHP ^8.x
+- Composer
+- Laravel ^12.x
+- MySQL
+- Xero API credentials with required scopes
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+---
 
-## Code of Conduct
+## Installation
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+1. Clone the repository
 
-## Security Vulnerabilities
+2. Install dependencies
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+```bash
+composer install
+```
 
-## License
+3. Copy environment file
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+```bash
+cp .env.example .env
+```
+
+4. Configure environment variables in `.env`
+
+5. Generate application key
+
+```bash
+php artisan key:generate
+```
+
+6. Run migrations (if applicable)
+
+```bash
+php artisan migrate
+```
+
+---
+
+## Configuration
+
+Environment variables are used for all sensitive data and API configuration.
+
+Typical configuration includes:
+
+- Xero API client credentials
+- OAuth access and refresh tokens
+- Tenant (organization) identifiers
+- Logging preferences
+
+No credentials are committed to the repository.
+
+---
+
+## Usage
+
+All functionality is executed via **Artisan commands**.
+
+Example:
+
+```bash
+php artisan xero:example-command
+```
+
+Commands are designed to be:
+
+- Explicit
+- Predictable
+- Logged for traceability
+
+Refer to the command class for detailed behavior and options.
+
+---
+
+## Logging & Validation
+
+- Basic logging is enabled for all operations
+- Errors are logged using Laravel’s default logging configuration
+- Validation focuses on:
+  - Record counts
+  - Key field consistency
+  - API response integrity
+
+Advanced reconciliation, retries, and rollback are intentionally out of scope unless explicitly implemented.
+
+---
+
+## Security
+
+- OAuth 2.0 compliant authentication
+- Secrets stored only in environment variables
+- No public routes or externally exposed endpoints
+- Intended for trusted execution environments only
+
+---
+
+## Scope & Limitations
+
+This project is intentionally minimal.
+
+Unless explicitly implemented, it does **not** include:
+
+- Deduplication logic
+- Rollback mechanisms
+- Automatic retries
+- Data reconciliation reports
+- UI or admin dashboards
+
+---
+
+## Development Notes
+
+- Keep commands small and single-purpose
+- Prefer clarity over abstraction
+- Avoid unnecessary services or listeners
+- This is a utility project, not a product
+
+---
+
+## Disclaimer
+
+This project is provided as-is for internal and private use only.  
+It assumes correct configuration, permissions, and approvals for the Xero API.
