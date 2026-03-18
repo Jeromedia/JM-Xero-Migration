@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class XeroPaymentMapping extends Model
 {
-    protected $table = 'xero_mapping_payments';
+    protected $table = 'mapping_xero_payments';
     protected $fillable = [
         'entity',
         'source_id',

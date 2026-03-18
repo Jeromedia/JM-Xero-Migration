@@ -90,98 +90,104 @@ class SyncTrackingCategories extends Command
 
         foreach ($trackingCategories as $trackingCategory) {
             $sourceTrackingCategoryId = $trackingCategory['TrackingCategoryID'];
+            $trackingCategoryName = $trackingCategory['Name'];
 
-            // 🔹 CHECK CATEGORY MAPPING FIRST
             $existingCategoryId = $destinationRole === 'test'
                 ? $mapper->getTestId(self::ENTITY, $sourceTrackingCategoryId)
                 : $mapper->getTargetId(self::ENTITY, $sourceTrackingCategoryId);
 
             if ($existingCategoryId) {
-                $this->info("Mapped already → Skipping category: {$trackingCategory['Name']} (ID: {$existingCategoryId})");
-                continue;
-            }
+                $destinationTrackingCategoryId = $existingCategoryId;
+                $this->info("Mapped already → Reusing category: {$trackingCategoryName} (ID: {$destinationTrackingCategoryId})");
+            } else {
+                $cleanTrackingCategory = collect($trackingCategory)
+                    ->except([
+                        'TrackingCategoryID',
+                        'HasValidationErrors',
+                        'Status',
+                        'Options',
+                    ])
+                    ->filter(function ($value) {
+                        return $value !== null && $value !== '';
+                    })
+                    ->toArray();
 
-            // 🔹 CLEAN CATEGORY PAYLOAD
-            $cleanTrackingCategory = collect($trackingCategory)
-                ->except([
-                    'TrackingCategoryID',
-                    'HasValidationErrors',
-                    'Status',
-                    'Options',
-                ])
-                ->filter(function ($value) {
-                    return $value !== null && $value !== '';
-                })
-                ->toArray();
+                $categoryPayload = $cleanTrackingCategory;
 
-            $categoryPayload = $cleanTrackingCategory;
+                if ($testMode) {
+                    $this->warn("Next tracking category: {$trackingCategoryName}");
+                    $this->line(json_encode($categoryPayload, JSON_PRETTY_PRINT));
 
-            if ($testMode) {
-                $this->warn("Next tracking category: {$trackingCategory['Name']}");
-                $this->line(json_encode($categoryPayload, JSON_PRETTY_PRINT));
-
-                if (!$this->confirm('Send this tracking category now?', false)) {
-                    return Command::SUCCESS;
+                    if (!$this->confirm('Send this tracking category now?', false)) {
+                        return Command::SUCCESS;
+                    }
+                } else {
+                    $this->info("Processing category: {$trackingCategoryName}");
                 }
-            } else {
-                $this->info("Processing category: {$trackingCategory['Name']}");
+
+                $putCategory = Http::withToken($destination->token->access_token)
+                    ->withHeaders([
+                        'Xero-tenant-id' => $destination->tenant_id,
+                        'Accept' => 'application/json',
+                        'Content-Type' => 'application/json',
+                    ])
+                    ->put('https://api.xero.com/api.xro/2.0/TrackingCategories', $categoryPayload);
+
+                if (!$putCategory->successful()) {
+                    $this->error("Failed to add tracking category {$trackingCategoryName}");
+                    $this->line('HTTP Status: ' . $putCategory->status());
+                    $this->line($putCategory->body());
+
+                    Log::error('Xero tracking category migration failed', [
+                        'category_name' => $trackingCategoryName,
+                        'payload' => $categoryPayload,
+                        'status' => $putCategory->status(),
+                        'response' => $putCategory->body(),
+                    ]);
+
+                    return Command::FAILURE;
+                }
+
+                $createdCategory = $putCategory->json('TrackingCategories.0');
+                $destinationTrackingCategoryId = $createdCategory['TrackingCategoryID'] ?? null;
+
+                if (!$destinationTrackingCategoryId) {
+                    $this->error('No destination category ID returned. Aborting.');
+                    return Command::FAILURE;
+                }
+
+                if ($destinationRole === 'test') {
+                    $mapper->storeTest(
+                        self::ENTITY,
+                        $sourceTrackingCategoryId,
+                        $destinationTrackingCategoryId,
+                        $source->tenant_id,
+                        $destination->tenant_id,
+                        $trackingCategoryName
+                    );
+
+                    $storedCategoryId = $mapper->getTestId(self::ENTITY, $sourceTrackingCategoryId);
+                } else {
+                    $mapper->storeTarget(
+                        self::ENTITY,
+                        $sourceTrackingCategoryId,
+                        $destinationTrackingCategoryId,
+                        $source->tenant_id,
+                        $destination->tenant_id,
+                        $trackingCategoryName
+                    );
+
+                    $storedCategoryId = $mapper->getTargetId(self::ENTITY, $sourceTrackingCategoryId);
+                }
+
+                if (!$storedCategoryId || $storedCategoryId !== $destinationTrackingCategoryId) {
+                    $this->error("Category mapping verification failed for {$trackingCategoryName}. Aborting.");
+                    return Command::FAILURE;
+                }
+
+                $this->info("Added + mapped category {$trackingCategoryName} → {$destinationTrackingCategoryId}");
             }
 
-            // 🔹 CREATE CATEGORY WITH PUT
-            $putCategory = Http::withToken($destination->token->access_token)
-                ->withHeaders([
-                    'Xero-tenant-id' => $destination->tenant_id,
-                    'Accept' => 'application/json',
-                    'Content-Type' => 'application/json',
-                ])
-                ->put('https://api.xero.com/api.xro/2.0/TrackingCategories', $categoryPayload);
-
-            if (!$putCategory->successful()) {
-                $this->error("Failed to add tracking category {$trackingCategory['Name']}");
-                $this->line('HTTP Status: ' . $putCategory->status());
-                $this->line($putCategory->body());
-
-                Log::error('Xero tracking category migration failed', [
-                    'category_name' => $trackingCategory['Name'],
-                    'payload' => $categoryPayload,
-                    'status' => $putCategory->status(),
-                    'response' => $putCategory->body(),
-                ]);
-
-                continue;
-            }
-
-            $createdCategory = $putCategory->json('TrackingCategories.0');
-            $destinationTrackingCategoryId = $createdCategory['TrackingCategoryID'] ?? null;
-
-            if (!$destinationTrackingCategoryId) {
-                $this->error('No destination category ID returned. Aborting.');
-                return Command::FAILURE;
-            }
-
-            // 🔹 STORE CATEGORY MAPPING
-            if ($destinationRole === 'test') {
-                $mapper->storeTest(
-                    self::ENTITY,
-                    $sourceTrackingCategoryId,
-                    $destinationTrackingCategoryId,
-                    $source->tenant_id,
-                    $destination->tenant_id,
-                    $trackingCategory['Name']
-                );
-            } else {
-                $mapper->storeTarget(
-                    self::ENTITY,
-                    $sourceTrackingCategoryId,
-                    $destinationTrackingCategoryId,
-                    $source->tenant_id,
-                    $destination->tenant_id
-                );
-            }
-
-            $this->info("Added + mapped category {$trackingCategory['Name']} → {$destinationTrackingCategoryId}");
-
-            // 🔹 CREATE OPTIONS ONE BY ONE WITH PUT
             $sourceOptions = collect($trackingCategory['Options'] ?? []);
 
             foreach ($sourceOptions as $sourceOption) {
@@ -192,9 +198,11 @@ class SyncTrackingCategories extends Command
                     continue;
                 }
 
+                $optionSourceKey = $this->buildOptionSourceKey($sourceTrackingCategoryId, $sourceOptionId);
+
                 $existingOptionId = $destinationRole === 'test'
-                    ? $mapper->getTestId(self::OPTION_ENTITY, $this->buildOptionSourceKey($sourceTrackingCategoryId, $sourceOptionId))
-                    : $mapper->getTargetId(self::OPTION_ENTITY, $this->buildOptionSourceKey($sourceTrackingCategoryId, $sourceOptionId));
+                    ? $mapper->getTestId(self::OPTION_ENTITY, $optionSourceKey)
+                    : $mapper->getTargetId(self::OPTION_ENTITY, $optionSourceKey);
 
                 if ($existingOptionId) {
                     $this->info("Mapped already → Skipping option: {$sourceOptionName} (ID: {$existingOptionId})");
@@ -233,12 +241,12 @@ class SyncTrackingCategories extends Command
                     );
 
                 if (!$putOption->successful()) {
-                    $this->error("Failed to add option {$sourceOptionName} in category {$trackingCategory['Name']}");
+                    $this->error("Failed to add option {$sourceOptionName} in category {$trackingCategoryName}");
                     $this->line('HTTP Status: ' . $putOption->status());
                     $this->line($putOption->body());
 
                     Log::error('Xero tracking option migration failed', [
-                        'category_name' => $trackingCategory['Name'],
+                        'category_name' => $trackingCategoryName,
                         'category_id' => $destinationTrackingCategoryId,
                         'option_name' => $sourceOptionName,
                         'payload' => $optionPayload,
@@ -246,7 +254,7 @@ class SyncTrackingCategories extends Command
                         'response' => $putOption->body(),
                     ]);
 
-                    continue;
+                    return Command::FAILURE;
                 }
 
                 $destinationOptionId = $putOption->json('Options.0.TrackingOptionID')
@@ -255,7 +263,6 @@ class SyncTrackingCategories extends Command
                     ?? null;
 
                 if (!$destinationOptionId) {
-                    // fallback: refetch category and match by name
                     $fetchCategory = Http::withToken($destination->token->access_token)
                         ->withHeaders([
                             'Xero-tenant-id' => $destination->tenant_id,
@@ -280,8 +287,6 @@ class SyncTrackingCategories extends Command
                     return Command::FAILURE;
                 }
 
-                $optionSourceKey = $this->buildOptionSourceKey($sourceTrackingCategoryId, $sourceOptionId);
-
                 if ($destinationRole === 'test') {
                     $mapper->storeTest(
                         self::OPTION_ENTITY,
@@ -291,14 +296,24 @@ class SyncTrackingCategories extends Command
                         $destination->tenant_id,
                         $sourceOptionName
                     );
+
+                    $storedOptionId = $mapper->getTestId(self::OPTION_ENTITY, $optionSourceKey);
                 } else {
                     $mapper->storeTarget(
                         self::OPTION_ENTITY,
                         $optionSourceKey,
                         $destinationOptionId,
                         $source->tenant_id,
-                        $destination->tenant_id
+                        $destination->tenant_id,
+                        $sourceOptionName
                     );
+
+                    $storedOptionId = $mapper->getTargetId(self::OPTION_ENTITY, $optionSourceKey);
+                }
+
+                if (!$storedOptionId || $storedOptionId !== $destinationOptionId) {
+                    $this->error("Option mapping verification failed for {$sourceOptionName}. Aborting.");
+                    return Command::FAILURE;
                 }
 
                 $this->info("Added + mapped option {$sourceOptionName} → {$destinationOptionId}");

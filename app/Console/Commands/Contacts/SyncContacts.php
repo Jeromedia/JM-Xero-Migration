@@ -39,6 +39,11 @@ class SyncContacts extends Command
         $source = XeroOrganisation::where('role', 'source')->first();
         $destination = XeroOrganisation::where('role', $destinationRole)->first();
 
+        if (!$source || !$destination) {
+            $this->error('Source or destination organisation not found.');
+            return Command::FAILURE;
+        }
+
         $page = 1;
 
         while (true) {
@@ -71,94 +76,80 @@ class SyncContacts extends Command
 
             foreach ($contacts as $contact) {
 
-                $sourceContactId = $contact['ContactID'];
+                $sourceId = $contact['ContactID'];
+                $name = $contact['Name'] ?? '[no name]';
 
                 // 🔹 CHECK MAPPING FIRST
                 $existing = $destinationRole === 'test'
-                    ? $mapper->getTestId(self::ENTITY, $sourceContactId)
-                    : $mapper->getTargetId(self::ENTITY, $sourceContactId);
+                    ? $mapper->getTestId(self::ENTITY, $sourceId)
+                    : $mapper->getTargetId(self::ENTITY, $sourceId);
 
                 if ($existing) {
-                    $this->info("Mapped already → Skipping: {$contact['Name']} (ID: {$existing})");
-                    continue;
-                }
-
-                // 🔹 CLEAN PAYLOAD
-                $cleanContact = collect($contact)
-                    ->except([
-                        'ContactID',
-                        'HasAttachments',
-                        'HasValidationErrors',
-                        'UpdatedDateUTC'
-                    ])
-                    ->filter(function ($value) {
-                        return $value !== null && $value !== '';
-                    })
-                    ->toArray();
-
-                $payload = [
-                    'Contacts' => [$cleanContact]
-                ];
-
-                $this->warn("Next contact: {$contact['Name']}");
-                $this->line(json_encode($payload, JSON_PRETTY_PRINT));
-
-                if (!$this->confirm('Send this contact now?', false)) {
-                    return Command::SUCCESS;
-                }
-
-                // 🔹 CREATE CONTACT
-                $post = Http::withToken($destination->token->access_token)
-                    ->withHeaders([
-                        'Xero-tenant-id' => $destination->tenant_id,
-                        'Accept' => 'application/json',
-                        'Content-Type' => 'application/json'
-                    ])
-                    ->post('https://api.xero.com/api.xro/2.0/Contacts', $payload);
-
-                if (!$post->successful()) {
-
-                    $this->error("Failed to add {$contact['Name']}");
-
-                    Log::error('Xero contact migration failed', [
-                        'payload' => $payload,
-                        'response' => $post->body()
-                    ]);
-
-                    continue;
-                }
-
-                $destinationId = $post->json('Contacts.0.ContactID');
-
-                // 🔴 HARD VALIDATION
-                if (!$destinationId) {
-                    $this->error("No destination ID returned. Aborting.");
-                    return Command::FAILURE;
-                }
-
-                // 🔹 STORE MAPPING
-                if ($destinationRole === 'test') {
-
-                    $mapper->storeTest(
-                        self::ENTITY,
-                        $sourceContactId,
-                        $destinationId,
-                        $source->tenant_id,
-                        $destination->tenant_id,
-                        $contact['Name']
-                    );
+                    $destinationId = $existing;
+                    $this->info("Mapped already → Reusing: {$name} ({$destinationId})");
                 } else {
 
-                    $mapper->storeTarget(
-                        self::ENTITY,
-                        $sourceContactId,
-                        $destinationId,
-                        $source->tenant_id,
-                        $destination->tenant_id
-                    );
-                }
+                    $cleanContact = collect($contact)
+                        ->except([
+                            'ContactID',
+                            'HasAttachments',
+                            'HasValidationErrors',
+                            'UpdatedDateUTC'
+                        ])
+                        ->filter(fn ($v) => $v !== null && $v !== '')
+                        ->toArray();
 
-                $this->info("Added + mapped {$contact['Name']} → {$destinationId}");
+                    $payload = ['Contacts' => [$cleanContact]];
+
+                    if ($testMode) {
+                        $this->warn("Next contact: {$name}");
+                        $this->line(json_encode($payload, JSON_PRETTY_PRINT));
+
+                        if (!$this->confirm('Send this contact now?', false)) {
+                            return Command::SUCCESS;
+                        }
+                    }
+
+                    $post = Http::withToken($destination->token->access_token)
+                        ->withHeaders([
+                            'Xero-tenant-id' => $destination->tenant_id,
+                            'Accept' => 'application/json',
+                            'Content-Type' => 'application/json'
+                        ])
+                        ->post('https://api.xero.com/api.xro/2.0/Contacts', $payload);
+
+                    if (!$post->successful()) {
+                        $this->error("Failed to add {$name}");
+                        Log::error('Contact migration failed', [
+                            'payload' => $payload,
+                            'response' => $post->body()
+                        ]);
+                        return Command::FAILURE;
+                    }
+
+                    $destinationId = $post->json('Contacts.0.ContactID');
+
+                    if (!$destinationId) {
+                        $this->error("No destination ID returned. Aborting.");
+                        return Command::FAILURE;
+                    }
+
+                    // 🔹 STORE MAPPING
+                    if ($destinationRole === 'test') {
+                        $mapper->storeTest(self::ENTITY, $sourceId, $destinationId, $source->tenant_id, $destination->tenant_id, $name);
+                        $stored = $mapper->getTestId(self::ENTITY, $sourceId);
+                    } else {
+                        $mapper->storeTarget(self::ENTITY, $sourceId, $destinationId, $source->tenant_id, $destination->tenant_id, $name);
+                        $stored = $mapper->getTargetId(self::ENTITY, $sourceId);
+                    }
+
+                    if (!$stored || $stored !== $destinationId) {
+                        $this->error("Mapping verification failed for {$name}");
+                        return Command::FAILURE;
+                    }
+
+                    $this->info("Added + mapped {$name} → {$destinationId}");
+                }
 
                 if ($testMode) {
                     return Command::SUCCESS;

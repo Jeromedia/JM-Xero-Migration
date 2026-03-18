@@ -5,13 +5,15 @@ namespace App\Console\Commands\Contacts;
 use App\Models\XeroOrganisation;
 use App\Services\Xero\XeroIdMapper;
 use Illuminate\Console\Command;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class SyncContactGroups extends Command
 {
     protected $signature = 'xero:contact-groups:sync {--live : Use target instead of test}';
     protected $description = 'Sync contact groups from SOURCE to TEST or TARGET';
+
+    private const ENTITY = 'contact_group';
 
     public function handle(): int
     {
@@ -31,210 +33,117 @@ class SyncContactGroups extends Command
             return Command::FAILURE;
         }
 
-        $this->info('Fetching SOURCE contact groups...');
-
-        $sourceResponse = Http::withToken($source->token->access_token)
+        $response = Http::withToken($source->token->access_token)
             ->withHeaders([
                 'Xero-tenant-id' => $source->tenant_id,
                 'Accept' => 'application/json',
             ])
             ->get('https://api.xero.com/api.xro/2.0/ContactGroups');
 
-        if (!$sourceResponse->successful()) {
-            $this->error('Failed to fetch SOURCE contact groups.');
-            $this->line($sourceResponse->body());
+        if (!$response->successful()) {
+            $this->error('Failed to fetch contact groups.');
             return Command::FAILURE;
         }
 
-        $sourceGroups = collect($sourceResponse->json('ContactGroups', []));
+        $groups = collect($response->json('ContactGroups', []));
 
-        $this->info('Fetching DESTINATION contact groups...');
-
-        $destinationResponse = Http::withToken($destination->token->access_token)
-            ->withHeaders([
-                'Xero-tenant-id' => $destination->tenant_id,
-                'Accept' => 'application/json',
-            ])
-            ->get('https://api.xero.com/api.xro/2.0/ContactGroups');
-
-        if (!$destinationResponse->successful()) {
-            $this->error('Failed to fetch DESTINATION contact groups.');
-            $this->line($destinationResponse->body());
-            return Command::FAILURE;
-        }
-
-        $destinationGroups = collect($destinationResponse->json('ContactGroups', []));
-
-        // Use Name as the practical matching key here.
-        // Contact Group names should be unique enough for this initial phase.
-        $destinationByName = $destinationGroups->keyBy(function ($group) {
-            return mb_strtolower(trim($group['Name'] ?? ''));
-        });
-
-        $alreadyMapped = 0;
-        $groupsToProcess = collect();
-
-        foreach ($sourceGroups as $group) {
-            $sourceGroupId = $group['ContactGroupID'] ?? null;
-
-            if (!$sourceGroupId) {
-                continue;
-            }
-
-            $mapped = $destinationRole === 'test'
-                ? $mapper->getTestId('contact_group', $sourceGroupId)
-                : $mapper->getTargetId('contact_group', $sourceGroupId);
-
-            if ($mapped) {
-                $alreadyMapped++;
-                continue;
-            }
-
-            $groupsToProcess->push($group);
-        }
-
-        $this->line('');
-        $this->info('SOURCE contact groups: ' . $sourceGroups->count());
-        $this->info('DESTINATION contact groups: ' . $destinationGroups->count());
-        $this->info('Already migrated (mapper): ' . $alreadyMapped);
-        $this->info('Contact groups to process: ' . $groupsToProcess->count());
-        $this->info('Ready to process: ' . $groupsToProcess->count());
-
-        $this->line('');
-        $this->info('Preview (first 10 contact groups):');
-
-        $groupsToProcess->take(10)->each(function ($group) {
-            $this->line('- ' . ($group['Name'] ?? '[no name]'));
-        });
-
-        $this->line('');
-
-        $mode = $this->choice(
-            'Select migration mode',
-            [
-                'Test (1 contact group only)',
-                'Batch (all contact groups)',
-            ],
-            0
-        );
-
-        if ($mode === 'Test (1 contact group only)') {
-            $groupsToProcess = $groupsToProcess->take(1);
-        }
-
-        if ($groupsToProcess->isEmpty()) {
-            $this->info('Nothing to migrate.');
+        if ($groups->isEmpty()) {
+            $this->info('No contact groups found.');
             return Command::SUCCESS;
         }
 
-        if (!$this->confirm('Start processing these contact groups?', true)) {
-            return Command::SUCCESS;
-        }
+        foreach ($groups as $group) {
 
-        $progress = $this->output->createProgressBar($groupsToProcess->count());
-        $progress->start();
-
-        foreach ($groupsToProcess as $group) {
-            $sourceGroupId = $group['ContactGroupID'] ?? null;
+            $sourceId = $group['ContactGroupID'];
             $name = trim($group['Name'] ?? '');
 
-            if (!$sourceGroupId || $name === '') {
-                $progress->advance();
+            if (!$sourceId || !$name) {
                 continue;
             }
 
-            $destinationKey = mb_strtolower($name);
+            // 🔹 CHECK MAPPING FIRST
+            $existing = $destinationRole === 'test'
+                ? $mapper->getTestId(self::ENTITY, $sourceId)
+                : $mapper->getTargetId(self::ENTITY, $sourceId);
 
-            if ($destinationByName->has($destinationKey)) {
-                // Already exists in destination by name, so just map it.
-                $destGroup = $destinationByName[$destinationKey];
-                $destinationId = $destGroup['ContactGroupID'] ?? null;
-
-                if (!$destinationId) {
-                    $progress->finish();
-                    $this->error('');
-                    $this->error('Existing destination contact group returned no ContactGroupID.');
-                    $this->error($name);
-                    $this->line(json_encode($destGroup, JSON_PRETTY_PRINT));
-
-                    return Command::FAILURE;
-                }
+            if ($existing) {
+                $destinationId = $existing;
+                $this->info("Mapped already → Reusing: {$name} ({$destinationId})");
             } else {
-                // Create new contact group in destination.
-                // Keep payload minimal.
-                $payload = [
-                    'ContactGroups' => [
-                        [
-                            'Name' => $name,
-                        ]
-                    ]
-                ];
 
-                $response = Http::withToken($destination->token->access_token)
+                // 🔹 FALLBACK: FIND BY NAME
+                $lookup = Http::withToken($destination->token->access_token)
                     ->withHeaders([
                         'Xero-tenant-id' => $destination->tenant_id,
                         'Accept' => 'application/json',
-                        'Content-Type' => 'application/json',
                     ])
-                    ->post(
-                        'https://api.xero.com/api.xro/2.0/ContactGroups',
-                        $payload
-                    );
+                    ->get('https://api.xero.com/api.xro/2.0/ContactGroups');
 
-                if (!$response->successful()) {
-                    $progress->finish();
-                    $this->error('');
-                    $this->error('Contact group creation FAILED.');
-                    $this->error($name);
-                    $this->line(json_encode($payload, JSON_PRETTY_PRINT));
-                    $this->line($response->body());
+                $destinationGroups = collect($lookup->json('ContactGroups', []));
 
+                $match = $destinationGroups->first(function ($g) use ($name) {
+                    return mb_strtolower(trim($g['Name'] ?? '')) === mb_strtolower($name);
+                });
+
+                if ($match) {
+                    $destinationId = $match['ContactGroupID'];
+                    $this->info("Matched by name → {$name}");
+                } else {
+
+                    $payload = [
+                        'ContactGroups' => [
+                            ['Name' => $name]
+                        ]
+                    ];
+
+                    $post = Http::withToken($destination->token->access_token)
+                        ->withHeaders([
+                            'Xero-tenant-id' => $destination->tenant_id,
+                            'Accept' => 'application/json',
+                            'Content-Type' => 'application/json',
+                        ])
+                        ->post('https://api.xero.com/api.xro/2.0/ContactGroups', $payload);
+
+                    if (!$post->successful()) {
+                        $this->error("Failed to create {$name}");
+                        Log::error('Contact group creation failed', [
+                            'payload' => $payload,
+                            'response' => $post->body()
+                        ]);
+                        return Command::FAILURE;
+                    }
+
+                    $destinationId = $post->json('ContactGroups.0.ContactGroupID');
+
+                    if (!$destinationId) {
+                        $this->error("No destination ID returned.");
+                        return Command::FAILURE;
+                    }
+
+                    $this->info("Created {$name}");
+                }
+
+                // 🔹 STORE + VERIFY
+                if ($destinationRole === 'test') {
+                    $mapper->storeTest(self::ENTITY, $sourceId, $destinationId, $source->tenant_id, $destination->tenant_id, $name);
+                    $stored = $mapper->getTestId(self::ENTITY, $sourceId);
+                } else {
+                    $mapper->storeTarget(self::ENTITY, $sourceId, $destinationId, $source->tenant_id, $destination->tenant_id, $name);
+                    $stored = $mapper->getTargetId(self::ENTITY, $sourceId);
+                }
+
+                if (!$stored || $stored !== $destinationId) {
+                    $this->error("Mapping verification failed for {$name}");
                     return Command::FAILURE;
                 }
 
-                $destinationId = $response->json('ContactGroups.0.ContactGroupID')
-                    ?? $response->json('ContactGroupID');
-
-                if (!$destinationId) {
-                    $progress->finish();
-                    $this->error('');
-                    $this->error('Contact group creation returned no destination ContactGroupID.');
-                    $this->error($name);
-                    $this->line(json_encode($payload, JSON_PRETTY_PRINT));
-                    $this->line($response->body());
-
-                    return Command::FAILURE;
-                }
+                $this->info("Mapped {$name} → {$destinationId}");
             }
 
-            if ($destinationRole === 'test') {
-                $mapper->storeTest(
-                    'contact_group',
-                    $sourceGroupId,
-                    $destinationId,
-                    $source->tenant_id,
-                    $destination->tenant_id,
-                    $name
-                );
-            } else {
-                $mapper->storeTarget(
-                    'contact_group',
-                    $sourceGroupId,
-                    $destinationId,
-                    $source->tenant_id,
-                    $destination->tenant_id
-                );
-            }
-
-            $progress->advance();
-            usleep(200000);
+            usleep(300000);
         }
 
-        $progress->finish();
-
-        $this->line('');
-        $this->info('Contact groups synchronization completed.');
-
+        $this->info('Finished.');
         return Command::SUCCESS;
     }
 }

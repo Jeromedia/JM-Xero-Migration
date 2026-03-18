@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class XeroCreditNoteMapping extends Model
 {
-    protected $table = 'xero_mapping_credit_notes';
+    protected $table = 'mapping_xero_credit_notes';
     protected $fillable = [
         'entity',
         'source_id',

@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class XeroTrackingCategoryMapping extends Model
 {
-    protected $table = 'xero_mapping_tracking_categories';
+    protected $table = 'mapping_xero_tracking_category';
     protected $fillable = [
         'entity',
         'source_id',

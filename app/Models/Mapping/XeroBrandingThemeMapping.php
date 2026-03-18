@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class XeroBrandingThemeMapping extends Model
 {
-    protected $table = 'xero_mapping_branding_themes';
+    protected $table = 'mapping_xero_branding_themes';
     protected $fillable = [
         'entity',
         'source_id',

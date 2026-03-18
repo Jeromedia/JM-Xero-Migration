@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class XeroContactGroupMapping extends Model
 {
-    protected $table = 'xero_mapping_contact_groups';
+    protected $table = 'mapping_xero_contact_group';
     protected $fillable = [
         'entity',
         'source_id',

@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class XeroTaxRateMapping extends Model
 {
-    protected $table = 'xero_mapping_tax_rates';
+    protected $table = 'mapping_xero_tax_rates';
     protected $fillable = [
         'entity',
         'source_id',

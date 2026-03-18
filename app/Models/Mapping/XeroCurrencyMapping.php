@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class XeroCurrencyMapping extends Model
 {
-    protected $table = 'xero_mapping_currencies';
+    protected $table = 'mapping_xero_currencies';
     protected $fillable = [
         'entity',
         'source_id',
