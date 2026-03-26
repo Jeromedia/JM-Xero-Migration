@@ -16,9 +16,10 @@ class SyncContacts extends Command
                             {--live : Use target instead of test}
                             {--name= : Sync only one contact by exact Name}
                             {--source-id= : Sync only one contact by source ContactID}
-                            {--first : Sync only the first source contact}';
+                            {--first : Sync only the first source contact}
+                            {--skip-ambiguous : Skip ambiguous contacts instead of failing}';
 
-    protected $description = 'Sync contacts from SOURCE to TEST or TARGET with mapping validation and recovery';
+    protected $description = 'Sync contacts from SOURCE to TEST or TARGET with strict validation, strict recovery, and duplicate protection';
 
     private const ENTITY = 'contact';
 
@@ -26,7 +27,7 @@ class SyncContacts extends Command
     {
         $destinationRole = $this->option('live') ? 'target' : 'test';
 
-        $this->info('Starting contacts sync (VALIDATED SMART MODE)...');
+        $this->info('Starting contacts sync (STRICT SAFE MODE)...');
         $this->info('Source role: source');
         $this->info('Destination role: ' . $destinationRole);
 
@@ -40,6 +41,12 @@ class SyncContacts extends Command
 
         if ($this->option('first')) {
             $this->info('Filter mode: first source contact only');
+        }
+
+        if ($this->option('skip-ambiguous')) {
+            $this->info('Ambiguous matches mode: skip');
+        } else {
+            $this->info('Ambiguous matches mode: fail');
         }
 
         $mapper = new XeroIdMapper();
@@ -71,13 +78,14 @@ class SyncContacts extends Command
         $totalMappedInvalid = 0;
         $totalRecovered = 0;
         $totalCreated = 0;
+        $totalAmbiguous = 0;
+        $totalSkipped = 0;
 
         $page = 1;
         $stopAfterFirstMatch = false;
 
         while (true) {
             $response = $this->getContactsPageWithRetry($source, $page, 'SOURCE');
-
             $sourceContacts = collect($response->json('Contacts', []));
 
             if ($sourceContacts->isEmpty()) {
@@ -101,6 +109,8 @@ class SyncContacts extends Command
             $pageMappedInvalid = 0;
             $pageRecovered = 0;
             $pageCreated = 0;
+            $pageAmbiguous = 0;
+            $pageSkipped = 0;
 
             $this->info("Processing page {$page} ({$sourceContacts->count()} contacts)...");
 
@@ -124,7 +134,7 @@ class SyncContacts extends Command
                 if ($mappedId) {
                     $mappedContact = $destinationById->get($mappedId);
 
-                    if ($mappedContact && $this->isReasonableMappedMatch($sourceContact, $mappedContact)) {
+                    if ($mappedContact && $this->isStrictMappedMatch($sourceContact, $mappedContact)) {
                         $pageMappedValid++;
                         $totalMappedValid++;
                         $this->info("Mapped already → Valid: {$name} ({$mappedId})");
@@ -135,7 +145,9 @@ class SyncContacts extends Command
                                 $totalMappedValid,
                                 $totalMappedInvalid,
                                 $totalRecovered,
-                                $totalCreated
+                                $totalCreated,
+                                $totalAmbiguous,
+                                $totalSkipped
                             );
                             return Command::SUCCESS;
                         }
@@ -145,16 +157,30 @@ class SyncContacts extends Command
 
                     $pageMappedInvalid++;
                     $totalMappedInvalid++;
+
+                    Log::warning('Contact mapped ID failed strict validation', [
+                        'destination_role' => $destinationRole,
+                        'source_contact_id' => $sourceId,
+                        'mapped_target_id' => $mappedId,
+                        'source_name' => $sourceContact['Name'] ?? null,
+                        'source_email' => $sourceContact['EmailAddress'] ?? null,
+                        'source_tax' => $sourceContact['TaxNumber'] ?? null,
+                        'mapped_name' => $mappedContact['Name'] ?? null,
+                        'mapped_email' => $mappedContact['EmailAddress'] ?? null,
+                        'mapped_tax' => $mappedContact['TaxNumber'] ?? null,
+                    ]);
                 }
 
-                $matchedDestination = $this->findDestinationMatch(
+                $matchResult = $this->findDestinationMatchStrict(
                     $sourceContact,
                     $destinationByName,
                     $destinationByEmail,
                     $destinationByTax
                 );
 
-                if ($matchedDestination) {
+                if ($matchResult['status'] === 'matched') {
+                    $matchedDestination = $matchResult['contact'];
+
                     $this->storeMapping(
                         $mapper,
                         $destinationRole,
@@ -184,12 +210,40 @@ class SyncContacts extends Command
                             $totalMappedValid,
                             $totalMappedInvalid,
                             $totalRecovered,
-                            $totalCreated
+                            $totalCreated,
+                            $totalAmbiguous,
+                            $totalSkipped
                         );
                         return Command::SUCCESS;
                     }
 
                     continue;
+                }
+
+                if ($matchResult['status'] === 'ambiguous') {
+                    $pageAmbiguous++;
+                    $totalAmbiguous++;
+
+                    $this->warn("Ambiguous destination match -> no create, no map: {$name}");
+
+                    Log::warning('Ambiguous contact match detected', [
+                        'destination_role' => $destinationRole,
+                        'source_contact_id' => $sourceId,
+                        'source_name' => $sourceContact['Name'] ?? null,
+                        'source_email' => $sourceContact['EmailAddress'] ?? null,
+                        'source_tax' => $sourceContact['TaxNumber'] ?? null,
+                        'candidate_count' => count($matchResult['candidates']),
+                        'candidates' => $matchResult['candidates'],
+                    ]);
+
+                    if ($this->option('skip-ambiguous')) {
+                        $pageSkipped++;
+                        $totalSkipped++;
+                        continue;
+                    }
+
+                    $this->error("Ambiguous contact match requires manual review: {$name}");
+                    return Command::FAILURE;
                 }
 
                 $cleanContact = $this->sanitizeContact($sourceContact);
@@ -243,7 +297,9 @@ class SyncContacts extends Command
                             $totalMappedValid,
                             $totalMappedInvalid,
                             $totalRecovered,
-                            $totalCreated
+                            $totalCreated,
+                            $totalAmbiguous,
+                            $totalSkipped
                         );
                         return Command::SUCCESS;
                     }
@@ -251,19 +307,21 @@ class SyncContacts extends Command
                     continue;
                 }
 
-                $this->warn("Create not completed -> refreshing destination index and retrying recovery: {$name}");
+                $this->warn("Create not completed -> refreshing destination index and retrying strict recovery: {$name}");
 
                 $destinationContacts = $this->fetchAllContacts($destination, strtoupper($destinationRole));
                 [$destinationById, $destinationByName, $destinationByEmail, $destinationByTax] = $this->buildDestinationIndexes($destinationContacts);
 
-                $matchedDestination = $this->findDestinationMatch(
+                $matchResult = $this->findDestinationMatchStrict(
                     $sourceContact,
                     $destinationByName,
                     $destinationByEmail,
                     $destinationByTax
                 );
 
-                if ($matchedDestination) {
+                if ($matchResult['status'] === 'matched') {
+                    $matchedDestination = $matchResult['contact'];
+
                     $this->storeMapping(
                         $mapper,
                         $destinationRole,
@@ -293,12 +351,42 @@ class SyncContacts extends Command
                             $totalMappedValid,
                             $totalMappedInvalid,
                             $totalRecovered,
-                            $totalCreated
+                            $totalCreated,
+                            $totalAmbiguous,
+                            $totalSkipped
                         );
                         return Command::SUCCESS;
                     }
 
                     continue;
+                }
+
+                if ($matchResult['status'] === 'ambiguous') {
+                    $pageAmbiguous++;
+                    $totalAmbiguous++;
+
+                    $this->warn("Ambiguous destination match after refresh -> no create, no map: {$name}");
+
+                    Log::warning('Ambiguous contact match detected after refresh', [
+                        'destination_role' => $destinationRole,
+                        'source_contact_id' => $sourceId,
+                        'source_name' => $sourceContact['Name'] ?? null,
+                        'source_email' => $sourceContact['EmailAddress'] ?? null,
+                        'source_tax' => $sourceContact['TaxNumber'] ?? null,
+                        'candidate_count' => count($matchResult['candidates']),
+                        'candidates' => $matchResult['candidates'],
+                        'post_status' => $post->status(),
+                        'post_response' => $post->body(),
+                    ]);
+
+                    if ($this->option('skip-ambiguous')) {
+                        $pageSkipped++;
+                        $totalSkipped++;
+                        continue;
+                    }
+
+                    $this->error("Ambiguous contact match after refresh requires manual review: {$name}");
+                    return Command::FAILURE;
                 }
 
                 $this->error("Unable to create or recover contact: {$name}");
@@ -319,7 +407,7 @@ class SyncContacts extends Command
             }
 
             $this->info(
-                "Page {$page} summary -> processed: {$pageProcessed} | valid mapped: {$pageMappedValid} | invalid mapped: {$pageMappedInvalid} | recovered: {$pageRecovered} | created: {$pageCreated}"
+                "Page {$page} summary -> processed: {$pageProcessed} | valid mapped: {$pageMappedValid} | invalid mapped: {$pageMappedInvalid} | recovered: {$pageRecovered} | created: {$pageCreated} | ambiguous: {$pageAmbiguous} | skipped: {$pageSkipped}"
             );
 
             $page++;
@@ -330,7 +418,9 @@ class SyncContacts extends Command
             $totalMappedValid,
             $totalMappedInvalid,
             $totalRecovered,
-            $totalCreated
+            $totalCreated,
+            $totalAmbiguous,
+            $totalSkipped
         );
 
         return Command::SUCCESS;
@@ -422,9 +512,8 @@ class SyncContacts extends Command
             return $response;
         }
 
-        return Http::response([
-            'Error' => "Rate limited while creating contact {$name} after retries.",
-        ], 429);
+        $this->error("Rate limited while creating contact {$name} after retries.");
+        throw new \RuntimeException("Rate limited while creating contact {$name} after retries.");
     }
 
     private function filterSourceContacts(Collection $contacts): Collection
@@ -465,63 +554,164 @@ class SyncContacts extends Command
         return [$byId, $byName, $byEmail, $byTax];
     }
 
-    private function findDestinationMatch(
+    private function findDestinationMatchStrict(
         array $sourceContact,
         Collection $destinationByName,
         Collection $destinationByEmail,
         Collection $destinationByTax
-    ): ?array {
-        $nameKey = $this->normalizeName($sourceContact['Name'] ?? '');
-        if ($nameKey !== '') {
-            $matches = $destinationByName->get($nameKey);
-            if ($matches && $matches->count() === 1) {
-                return $matches->first();
-            }
+    ): array {
+        $sourceName = $this->normalizeName($sourceContact['Name'] ?? '');
+        $sourceEmail = $this->normalizeEmail($sourceContact['EmailAddress'] ?? null);
+        $sourceTax = $this->normalizeTax($sourceContact['TaxNumber'] ?? null);
+
+        if ($sourceName === '') {
+            return [
+                'status' => 'none',
+                'contact' => null,
+                'candidates' => [],
+            ];
         }
 
-        $emailKey = $this->normalizeEmail($sourceContact['EmailAddress'] ?? null);
-        if ($emailKey) {
-            $matches = $destinationByEmail->get($emailKey);
-            if ($matches && $matches->count() === 1) {
-                return $matches->first();
-            }
+        $nameMatches = collect($destinationByName->get($sourceName, collect()))
+            ->filter(fn ($contact) => is_array($contact))
+            ->values();
+
+        if ($nameMatches->isEmpty()) {
+            return [
+                'status' => 'none',
+                'contact' => null,
+                'candidates' => [],
+            ];
         }
 
-        $taxKey = $this->normalizeTax($sourceContact['TaxNumber'] ?? null);
-        if ($taxKey) {
-            $matches = $destinationByTax->get($taxKey);
-            if ($matches && $matches->count() === 1) {
-                return $matches->first();
+        $strictMatches = $nameMatches->filter(function (array $destinationContact) use ($sourceEmail, $sourceTax) {
+            $destinationEmail = $this->normalizeEmail($destinationContact['EmailAddress'] ?? null);
+            $destinationTax = $this->normalizeTax($destinationContact['TaxNumber'] ?? null);
+
+            if ($sourceEmail !== null && $destinationEmail !== $sourceEmail) {
+                return false;
             }
+
+            if ($sourceTax !== null && $destinationTax !== $sourceTax) {
+                return false;
+            }
+
+            return true;
+        })->values();
+
+        if ($strictMatches->count() === 1) {
+            return [
+                'status' => 'matched',
+                'contact' => $strictMatches->first(),
+                'candidates' => [],
+            ];
         }
 
-        return null;
+        if ($strictMatches->count() > 1) {
+            return [
+                'status' => 'ambiguous',
+                'contact' => null,
+                'candidates' => $strictMatches
+                    ->map(fn (array $contact) => $this->candidateSummary($contact))
+                    ->all(),
+            ];
+        }
+
+        $corroboratedMatches = $nameMatches->filter(function (array $destinationContact) use ($sourceEmail, $sourceTax) {
+            $destinationEmail = $this->normalizeEmail($destinationContact['EmailAddress'] ?? null);
+            $destinationTax = $this->normalizeTax($destinationContact['TaxNumber'] ?? null);
+
+            $emailMatches = $sourceEmail !== null && $destinationEmail === $sourceEmail;
+            $taxMatches = $sourceTax !== null && $destinationTax === $sourceTax;
+
+            return $emailMatches || $taxMatches;
+        })->values();
+
+        if ($corroboratedMatches->count() === 1) {
+            return [
+                'status' => 'matched',
+                'contact' => $corroboratedMatches->first(),
+                'candidates' => [],
+            ];
+        }
+
+        if ($corroboratedMatches->count() > 1) {
+            return [
+                'status' => 'ambiguous',
+                'contact' => null,
+                'candidates' => $corroboratedMatches
+                    ->map(fn (array $contact) => $this->candidateSummary($contact))
+                    ->all(),
+            ];
+        }
+
+        if ($nameMatches->count() === 1) {
+            $single = $nameMatches->first();
+
+            $destinationEmail = $this->normalizeEmail($single['EmailAddress'] ?? null);
+            $destinationTax = $this->normalizeTax($single['TaxNumber'] ?? null);
+
+            $emailConflict = $sourceEmail !== null && $destinationEmail !== null && $sourceEmail !== $destinationEmail;
+            $taxConflict = $sourceTax !== null && $destinationTax !== null && $sourceTax !== $destinationTax;
+
+            if ($emailConflict || $taxConflict) {
+                return [
+                    'status' => 'ambiguous',
+                    'contact' => null,
+                    'candidates' => [$this->candidateSummary($single)],
+                ];
+            }
+
+            return [
+                'status' => 'matched',
+                'contact' => $single,
+                'candidates' => [],
+            ];
+        }
+
+        return [
+            'status' => 'ambiguous',
+            'contact' => null,
+            'candidates' => $nameMatches
+                ->map(fn (array $contact) => $this->candidateSummary($contact))
+                ->all(),
+        ];
     }
 
-    private function isReasonableMappedMatch(array $sourceContact, array $destinationContact): bool
+    private function candidateSummary(array $contact): array
+    {
+        return [
+            'ContactID' => $contact['ContactID'] ?? null,
+            'Name' => $contact['Name'] ?? null,
+            'EmailAddress' => $contact['EmailAddress'] ?? null,
+            'TaxNumber' => $contact['TaxNumber'] ?? null,
+        ];
+    }
+
+    private function isStrictMappedMatch(array $sourceContact, array $destinationContact): bool
     {
         $sourceName = $this->normalizeName($sourceContact['Name'] ?? '');
         $destinationName = $this->normalizeName($destinationContact['Name'] ?? '');
 
-        if ($sourceName !== '' && $destinationName !== '' && $sourceName === $destinationName) {
-            return true;
+        if ($sourceName === '' || $destinationName === '' || $sourceName !== $destinationName) {
+            return false;
         }
 
         $sourceEmail = $this->normalizeEmail($sourceContact['EmailAddress'] ?? null);
         $destinationEmail = $this->normalizeEmail($destinationContact['EmailAddress'] ?? null);
 
-        if ($sourceEmail && $destinationEmail && $sourceEmail === $destinationEmail) {
-            return true;
+        if ($sourceEmail !== null && $destinationEmail !== $sourceEmail) {
+            return false;
         }
 
         $sourceTax = $this->normalizeTax($sourceContact['TaxNumber'] ?? null);
         $destinationTax = $this->normalizeTax($destinationContact['TaxNumber'] ?? null);
 
-        if ($sourceTax && $destinationTax && $sourceTax === $destinationTax) {
-            return true;
+        if ($sourceTax !== null && $destinationTax !== $sourceTax) {
+            return false;
         }
 
-        return false;
+        return true;
     }
 
     private function normalizeName(?string $value): string
@@ -659,7 +849,9 @@ class SyncContacts extends Command
         int $totalMappedValid,
         int $totalMappedInvalid,
         int $totalRecovered,
-        int $totalCreated
+        int $totalCreated,
+        int $totalAmbiguous,
+        int $totalSkipped
     ): void {
         $this->newLine();
         $this->info('Done.');
@@ -668,5 +860,7 @@ class SyncContacts extends Command
         $this->line("Invalid mapped found: {$totalMappedInvalid}");
         $this->line("Recovered + mapped: {$totalRecovered}");
         $this->line("Created + mapped: {$totalCreated}");
+        $this->line("Ambiguous found: {$totalAmbiguous}");
+        $this->line("Skipped ambiguous: {$totalSkipped}");
     }
 }

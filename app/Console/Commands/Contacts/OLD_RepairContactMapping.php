@@ -7,7 +7,7 @@ use App\Services\Xero\XeroIdMapper;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
 
-class RepairContactMapping extends Command
+class OLD_RepairContactMapping extends Command
 {
     protected $signature = 'xero:contacts:repair-mapping {--live : Use target instead of test}';
     protected $description = 'Repair contact mappings using smart matching';

@@ -4,6 +4,7 @@ namespace App\Console\Commands\Accounts;
 
 use App\Models\XeroOrganisation;
 use Illuminate\Console\Command;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
 
@@ -196,21 +197,46 @@ class CompareAccounts extends Command
 
     private function fetchAccounts(XeroOrganisation $organisation, string $label): Collection
     {
-        $response = Http::withToken($organisation->token->access_token)
-            ->withHeaders([
-                'Xero-tenant-id' => $organisation->tenant_id,
-                'Accept' => 'application/json',
-            ])
-            ->get('https://api.xero.com/api.xro/2.0/Accounts');
+        $response = $this->getAccountsWithRetry($organisation, $label);
 
-        if (!$response->successful()) {
+        return collect($response->json('Accounts', []));
+    }
+
+    private function getAccountsWithRetry(XeroOrganisation $organisation, string $label): Response
+    {
+        $maxAttempts = 6;
+        $attempt = 1;
+
+        while ($attempt <= $maxAttempts) {
+            $response = Http::withToken($organisation->token->access_token)
+                ->withHeaders([
+                    'Xero-tenant-id' => $organisation->tenant_id,
+                    'Accept' => 'application/json',
+                ])
+                ->get('https://api.xero.com/api.xro/2.0/Accounts');
+
+            if ($response->successful()) {
+                return $response;
+            }
+
+            if ($response->status() === 429) {
+                $retryAfter = (int) ($response->header('Retry-After') ?? 5);
+                $retryAfter = $retryAfter > 0 ? $retryAfter : 5;
+
+                $this->warn("Rate limited while fetching {$label} accounts. Waiting {$retryAfter} seconds before retry {$attempt}/{$maxAttempts}...");
+                sleep($retryAfter);
+                $attempt++;
+                continue;
+            }
+
             $this->error("Failed to fetch {$label} accounts.");
             $this->line('HTTP Status: ' . $response->status());
             $this->line($response->body());
             throw new \RuntimeException("Failed to fetch {$label} accounts.");
         }
 
-        return collect($response->json('Accounts', []));
+        $this->error("Failed to fetch {$label} accounts after retries.");
+        throw new \RuntimeException("Failed to fetch {$label} accounts after retries.");
     }
 
     private function indexByCode(Collection $accounts): Collection

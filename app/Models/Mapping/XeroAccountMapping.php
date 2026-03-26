@@ -6,6 +6,8 @@ use Illuminate\Database\Eloquent\Model;
 
 class XeroAccountMapping extends Model
 {
+    protected $table = 'mapping_xero_account';
+
     protected $fillable = [
         'entity',
         'source_id',
